@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <title>Aniimo Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    body, html { margin: 0; padding: 0; height: 100%; font-family: sans-serif; }
+    #map { width: 100%; height: 100%; }
+
+    #sidebar {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      width: 250px;
+      background: #ffffffee;
+      border: 1px solid #ccc;
+      padding: 10px;
+      z-index: 1001;
+      border-radius: 10px;
+      box-shadow: 2px 2px 5px rgba(0,0,0,0.2);
+    }
+    #sidebar h2 {
+      margin-top: 0;
+      font-size: 16px;
+    }
+    #sidebar input[type="text"] {
+      width: 100%;
+      margin-bottom: 10px;
+    }
+    #markerForm {
+      display: none;
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      background: white;
+      padding: 10px;
+      border: 1px solid #ccc;
+      z-index: 1001;
+      width: 250px;
+    }
+    #markerTable {
+      max-height: 200px;
+      overflow-y: auto;
+      margin-top: 10px;
+      font-size: 12px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    table th, table td {
+      border: 1px solid #ddd;
+      padding: 4px;
+    }
+    table th {
+      background: #f0f0f0;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div id="sidebar">
+    <h2>🗺️ Karte steuern</h2>
+    <input type="text" id="searchInput" placeholder="🔍 Suche nach Marker..." />
+    <button id="resetFilters">🔁 Alles einblenden</button>
+    <button id="hideAll">❌ Nichts einblenden</button>
+    <hr>
+    <label><input type="checkbox" class="typeFilter" value="boss" checked> Boss</label><br>
+    <label><input type="checkbox" class="typeFilter" value="sanctum" checked> Sanctum</label><br>
+    <label><input type="checkbox" class="typeFilter" value="twining" checked> Twining</label><br>
+    <label><input type="checkbox" class="typeFilter" value="chest" checked> Chest</label>
+    <div id="markerTable"></div>
+  </div>
+
+  <!-- Marker-Formular -->
+  <div id="markerForm">
+    <label>Name:<br><input type="text" id="markerName" /></label><br>
+    <label>Beschreibung:<br><input type="text" id="markerInfo" /></label><br>
+    <label>Typ:<br>
+      <select id="markerType">
+        <option value="boss">Boss</option>
+        <option value="sanctum">Sanctum</option>
+        <option value="twining">Twining</option>
+        <option value="chest">Chest</option>
+      </select>
+    </label><br><br>
+    <button id="addMarkerBtn">💾 Speichern</button>
+    <button id="cancelMarkerBtn">❌ Abbrechen</button>
+  </div>
+
+  <script>
+    var map = L.map('map', {
+      crs: L.CRS.Simple,
+      minZoom: -2,
+      maxZoom: 2
+    });
+
+    var bounds = [[0, 0], [1000, 1000]];
+    var image = L.imageOverlay('aniimo-map.png', bounds).addTo(map);
+    map.fitBounds(bounds);
+
+    const allMarkers = {};
+    let pendingCoords = null;
+    let editId = null;
+
+    // Marker laden
+    fetch("/api/marker")
+      .then(res => res.json())
+      .then(data => {
+        data.forEach(createMarker);
+        updateMarkerTable();
+      });
+
+    function createMarker(markerData) {
+      const iconUrl = {
+        boss: 'icons/boss.png',
+        sanctum: 'icons/sanctum.png',
+        twining: 'icons/twining.png',
+        chest: 'icons/chest.png'
+      }[markerData.type] || 'icons/default.png';
+
+      const icon = L.icon({
+        iconUrl: iconUrl,
+        iconSize: [32, 40],
+        iconAnchor: [16, 40],
+        popupAnchor: [0, -36]
+      });
+
+      const marker = L.marker(markerData.coords, { icon }).addTo(map)
+        .bindPopup(`<b>${markerData.name}</b><br>${markerData.info}`);
+
+      marker.on("contextmenu", () => {
+        if (confirm(`Möchtest du den Marker "${markerData.name}" löschen?`)) {
+          marker.remove();
+          fetch("/api/marker/" + markerData.id, { method: "DELETE" });
+          delete allMarkers[markerData.id];
+          updateMarkerTable();
+        }
+      });
+
+      marker.on("dblclick", () => {
+        editId = markerData.id;
+        pendingCoords = markerData.coords;
+        document.getElementById("markerName").value = markerData.name;
+        document.getElementById("markerInfo").value = markerData.info;
+        document.getElementById("markerType").value = markerData.type;
+        document.getElementById("markerForm").style.display = "block";
+      });
+
+      allMarkers[markerData.id] = marker;
+    }
+
+    map.on('click', function (e) {
+      pendingCoords = [e.latlng.lat.toFixed(2), e.latlng.lng.toFixed(2)];
+      editId = null;
+      document.getElementById("markerForm").style.display = "block";
+      document.getElementById("markerName").value = "";
+      document.getElementById("markerInfo").value = "";
+      document.getElementById("markerType").selectedIndex = 0;
+    });
+
+    document.getElementById("addMarkerBtn").onclick = function (e) {
+      e.preventDefault();
+
+      const name = document.getElementById("markerName").value;
+      const info = document.getElementById("markerInfo").value;
+      const type = document.getElementById("markerType").value;
+      const id = editId || Date.now().toString();
+
+      if (!name || !info || !type || !pendingCoords) return;
+
+      const newMarker = { id, name, info, type, coords: pendingCoords };
+
+      if (editId && allMarkers[id]) {
+        allMarkers[id].remove();
+        delete allMarkers[id];
+        fetch("/api/marker/" + id, { method: "DELETE" });
+      }
+
+      createMarker(newMarker);
+
+      fetch("/api/marker", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(newMarker)
+      });
+
+      document.getElementById("markerForm").style.display = "none";
+      pendingCoords = null;
+      editId = null;
+      updateMarkerTable();
+    };
+
+    document.getElementById("cancelMarkerBtn").onclick = function (e) {
+      e.preventDefault();
+      document.getElementById("markerForm").style.display = "none";
+      pendingCoords = null;
+      editId = null;
+    };
+
+    document.querySelectorAll('.typeFilter').forEach(cb => {
+      cb.addEventListener('change', updateVisibleMarkers);
+    });
+
+    document.getElementById("resetFilters").onclick = () => {
+      document.querySelectorAll('.typeFilter').forEach(cb => cb.checked = true);
+      updateVisibleMarkers();
+    };
+
+    document.getElementById("hideAll").onclick = () => {
+      document.querySelectorAll('.typeFilter').forEach(cb => cb.checked = false);
+      updateVisibleMarkers();
+    };
+
+    function updateVisibleMarkers() {
+      const visibleTypes = Array.from(document.querySelectorAll('.typeFilter'))
+        .filter(cb => cb.checked)
+        .map(cb => cb.value);
+
+      Object.entries(allMarkers).forEach(([id, marker]) => {
+        const type = marker.options.icon.options.iconUrl.split('/').pop().split('.')[0];
+        if (visibleTypes.includes(type)) {
+          marker.addTo(map);
+        } else {
+          map.removeLayer(marker);
+        }
+      });
+    }
+
+    document.getElementById("searchInput").addEventListener("input", function () {
+      const searchTerm = this.value.toLowerCase();
+      const match = Object.values(allMarkers).find(marker =>
+        marker.getPopup().getContent().toLowerCase().includes(searchTerm)
+      );
+      if (match) {
+        map.setView(match.getLatLng(), 0);
+        match.openPopup();
+      }
+    });
+
+    function updateMarkerTable() {
+      const container = document.getElementById("markerTable");
+      const rows = Object.entries(allMarkers).map(([id, marker]) => {
+        const type = marker.options.icon.options.iconUrl.split('/').pop().split('.')[0];
+        const popup = marker.getPopup().getContent().split('<br>');
+        const name = popup[0].replace("<b>", "").replace("</b>", "");
+        const info = popup[1];
+
+        return `
+          <tr>
+            <td>${name}</td>
+            <td>${type}</td>
+            <td>
+              <button onclick="allMarkers['${id}'].openPopup(); map.setView(allMarkers['${id}'].getLatLng(), 0);">👁️</button>
+              <button onclick="allMarkers['${id}'].fire('dblclick')">✏️</button>
+            </td>
+          </tr>
+        `;
+      }).join("");
+
+      container.innerHTML = `
+        <table>
+          <thead><tr><th>Name</th><th>Typ</th><th>Aktion</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    }
+  </script>
+</body>
+</html>
